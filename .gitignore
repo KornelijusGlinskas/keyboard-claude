@@ -1,0 +1,13 @@
+# Compiled firmware (rebuild with ./firmware/build.sh)
+firmware/*.hex
+
+# Claude Code local settings
+.claude/
+
+# Temp files
+*.tmp
+hook-test-temp.txt
+__pycache__/
+
+# Skill files (installed separately)
+*.skill
