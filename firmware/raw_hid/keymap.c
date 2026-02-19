@@ -8,6 +8,9 @@
 //   CMD 0x04: Set all LEDs      [0x04, h, s, v]
 //   CMD 0x05: Enter direct mode [0x05]  — responds [0x05, 0x01, led_count]
 //   CMD 0x06: Set underglow      [0x06, h, s, v]  — sets all 8 underglow LEDs
+//   CMD 0x07: Set blink          [0x07, led_idx, enable]  — 1=blink, 0=steady
+//   CMD 0x08: Set blink speed    [0x08, period_ms_lo, period_ms_hi]  — default 500ms
+//   CMD 0x09: Bootloader         [0x09, 0xB0, 0x07]  — reboot into bootloader (magic bytes required)
 //   CMD 0xF0: Ping              [0xF0]  — responds [0xF0, 0x01, led_count]
 
 #include QMK_KEYBOARD_H
@@ -15,8 +18,10 @@
 
 #define NUM_LEDS 12
 
-static bool    direct_mode = false;
-static uint8_t led_buf[NUM_LEDS][3]; // h, s, v per LED
+static bool     direct_mode = false;
+static uint8_t  led_buf[NUM_LEDS][3]; // h, s, v per LED
+static uint16_t blink_mask = 0;       // bit per LED: 1=blinking
+static uint16_t blink_period = 500;   // ms per full on/off cycle
 
 enum custom_keycodes {
     LED_LEVEL = QK_USER,
@@ -64,6 +69,7 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
         }
         case 0x03: { // Restore normal effect
             direct_mode = false;
+            blink_mask = 0;
             response[1] = 0x01;
             break;
         }
@@ -80,7 +86,7 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
         }
         case 0x05: { // Enter direct mode
             direct_mode = true;
-            // Zero out buffer
+            blink_mask = 0;
             memset(led_buf, 0, sizeof(led_buf));
             response[1] = 0x01;
             response[2] = NUM_LEDS;
@@ -90,6 +96,33 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
             rgblight_mode_noeeprom(RGBLIGHT_MODE_STATIC_LIGHT);
             rgblight_sethsv_noeeprom(data[1], data[2], data[3]);
             response[1] = 0x01;
+            break;
+        }
+        case 0x07: { // Set blink for individual LED
+            uint8_t idx = data[1];
+            if (idx < NUM_LEDS) {
+                if (data[2]) {
+                    blink_mask |= (1 << idx);
+                } else {
+                    blink_mask &= ~(1 << idx);
+                }
+            }
+            response[1] = 0x01;
+            break;
+        }
+        case 0x08: { // Set blink speed (period in ms)
+            blink_period = data[1] | (data[2] << 8);
+            if (blink_period < 50) blink_period = 50;
+            response[1] = 0x01;
+            break;
+        }
+        case 0x09: { // Reboot into bootloader (requires magic bytes 0xB0, 0x07)
+            if (data[1] == 0xB0 && data[2] == 0x07) {
+                response[1] = 0x01;
+                raw_hid_send(response, sizeof(response));
+                reset_keyboard();
+            }
+            response[1] = 0xFF; // wrong magic
             break;
         }
         case 0xF0: { // Ping
@@ -108,8 +141,13 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
 // Apply direct-mode colors after normal RGB effect renders each frame
 bool rgb_matrix_indicators_user(void) {
     if (direct_mode) {
+        bool blink_on = (timer_read() % blink_period) < (blink_period / 2);
         for (uint8_t i = 0; i < NUM_LEDS; i++) {
-            set_led_rgb(i, led_buf[i][0], led_buf[i][1], led_buf[i][2]);
+            if ((blink_mask & (1 << i)) && !blink_on) {
+                rgb_matrix_set_color(i, 0, 0, 0);
+            } else {
+                set_led_rgb(i, led_buf[i][0], led_buf[i][1], led_buf[i][2]);
+            }
         }
     }
     return true;
