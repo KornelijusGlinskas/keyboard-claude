@@ -115,12 +115,27 @@ build_raw_hid() {
 
 # ── Flash ───────────────────────────────────────
 
+reboot_to_bootloader() {
+    # Try to send Raw HID command 0x09 (with magic bytes) to reboot into bootloader
+    python3 -c "
+import hid, sys
+try:
+    dev = hid.device()
+    for desc in hid.enumerate(0x574C, 0xE6E3):
+        if desc['usage_page'] == 0xFF60 and desc['usage'] == 0x61:
+            dev.open_path(desc['path'])
+            msg = bytes([0x09, 0xB0, 0x07]) + b'\x00' * 29
+            dev.write(b'\x00' + msg)
+            dev.close()
+            sys.exit(0)
+    sys.exit(1)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null
+}
+
 flash_firmware() {
     bold "Flashing firmware..."
-    echo
-    echo "1. Hold down the top-left encoder"
-    echo "2. Plug in the USB cable (or tap the reset button)"
-    echo "3. Release the encoder — keyboard should be in bootloader mode"
     echo
 
     HEX=$(ls -t "$FIRMWARE_DIR"/*.hex 2>/dev/null | head -1)
@@ -131,8 +146,18 @@ flash_firmware() {
     fi
 
     bold "Flashing: $HEX"
-    echo "Waiting for bootloader..."
 
+    # Try software reboot into bootloader first
+    if reboot_to_bootloader; then
+        green "Sent bootloader reboot via USB"
+        sleep 2
+    else
+        echo "Could not reach keyboard via USB — manual bootloader entry needed:"
+        echo "  Hold top-left encoder + plug USB"
+        echo
+    fi
+
+    echo "Waiting for bootloader..."
     check_qmk
     qmk flash -kb work_louder/micro "$HEX"
 }
