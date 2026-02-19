@@ -7,6 +7,7 @@
 //   CMD 0x03: Restore effect    [0x03]  — exits direct mode, resumes normal RGB
 //   CMD 0x04: Set all LEDs      [0x04, h, s, v]
 //   CMD 0x05: Enter direct mode [0x05]  — responds [0x05, 0x01, led_count]
+//   CMD 0x06: Set underglow      [0x06, h, s, v]  — sets all 8 underglow LEDs
 //   CMD 0xF0: Ping              [0xF0]  — responds [0xF0, 0x01, led_count]
 
 #include QMK_KEYBOARD_H
@@ -83,6 +84,12 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
             memset(led_buf, 0, sizeof(led_buf));
             response[1] = 0x01;
             response[2] = NUM_LEDS;
+            break;
+        }
+        case 0x06: { // Set underglow color (rgblight, 8 LEDs on D2)
+            rgblight_mode_noeeprom(RGBLIGHT_MODE_STATIC_LIGHT);
+            rgblight_sethsv_noeeprom(data[1], data[2], data[3]);
+            response[1] = 0x01;
             break;
         }
         case 0xF0: { // Ping
