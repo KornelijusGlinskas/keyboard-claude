@@ -12,6 +12,7 @@
 //   CMD 0x08: Set blink speed    [0x08, period_ms_lo, period_ms_hi]  — default 500ms
 //   CMD 0x09: Bootloader         [0x09, 0xB0, 0x07]  — reboot into bootloader (magic bytes required)
 //   CMD 0x0A: Underglow breathe  [0x0A, h, s, v]  — breathing effect on underglow
+//   CMD 0xEE: Key event (out)    [0xEE, row, col]  — sent by firmware on key press in direct mode
 //   CMD 0xF0: Ping              [0xF0]  — responds [0xF0, 0x01, led_count]
 
 #include QMK_KEYBOARD_H
@@ -199,6 +200,15 @@ typedef union {
 work_louder_config_t work_louder_config;
 
 bool process_record_user(uint16_t keycode, keyrecord_t *record) {
+    // Report key presses to daemon when in direct mode
+    if (direct_mode && record->event.pressed) {
+        uint8_t report[32] = {0};
+        report[0] = 0xEE;
+        report[1] = record->event.key.row;
+        report[2] = record->event.key.col;
+        raw_hid_send(report, sizeof(report));
+    }
+
     switch (keycode) {
         case LED_LEVEL:
             if (record->event.pressed) {
