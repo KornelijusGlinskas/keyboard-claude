@@ -11,6 +11,7 @@
 //   CMD 0x07: Set blink          [0x07, led_idx, enable]  — 1=blink, 0=steady
 //   CMD 0x08: Set blink speed    [0x08, period_ms_lo, period_ms_hi]  — default 500ms
 //   CMD 0x09: Bootloader         [0x09, 0xB0, 0x07]  — reboot into bootloader (magic bytes required)
+//   CMD 0x0A: Underglow breathe  [0x0A, h, s, v]  — breathing effect on underglow
 //   CMD 0xF0: Ping              [0xF0]  — responds [0xF0, 0x01, led_count]
 
 #include QMK_KEYBOARD_H
@@ -113,6 +114,12 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
         case 0x08: { // Set blink speed (period in ms)
             blink_period = data[1] | (data[2] << 8);
             if (blink_period < 50) blink_period = 50;
+            response[1] = 0x01;
+            break;
+        }
+        case 0x0A: { // Underglow breathing effect
+            rgblight_mode_noeeprom(RGBLIGHT_MODE_BREATHING);
+            rgblight_sethsv_noeeprom(data[1], data[2], data[3]);
             response[1] = 0x01;
             break;
         }
