@@ -147,6 +147,15 @@ class RawHIDProtocol(KeyboardProtocol):
             payload += bytes([h, s, v])
         self._send(payload)
 
+    def set_blink(self, idx, enable):
+        self._send(bytes([0x07, idx, 1 if enable else 0]))
+
+    def set_underglow(self, h, s, v):
+        self._send(bytes([0x06, h, s, v]))
+
+    def set_underglow_breathe(self, h, s, v):
+        self._send(bytes([0x0A, h, s, v]))
+
     def restore_effect(self):
         self._send(bytes([0x03]))
 
@@ -282,21 +291,27 @@ def read_new_events(pos):
 
 # === LED patterns ===
 
+# LEDs that indicate "your turn" — blink these when Claude needs input
+ACTIVE_LEDS = [8, 7, 3, 1, 0]
+
 def set_your_turn(kb):
-    """All per-key LEDs orange — Claude needs your input."""
-    kb.set_all_leds(ORANGE_H, ORANGE_S, ORANGE_V)
+    """Active LEDs blink orange, others off, underglow static orange."""
+    kb.enter_direct_mode()
+    kb.set_all_leds(0, 0, 0)
+    for idx in ACTIVE_LEDS:
+        kb.set_led(idx, ORANGE_H, ORANGE_S, ORANGE_V)
+        kb.set_blink(idx, True)
+    kb.set_underglow(ORANGE_H, ORANGE_S, ORANGE_V)
 
 
 def set_claude_working(kb):
-    """All LEDs off — Claude is busy, keyboard is ambient."""
+    """Active LEDs solid orange, underglow breathing."""
+    kb.enter_direct_mode()
     kb.set_all_leds(0, 0, 0)
-
-
-def set_row_color(kb, row, h, s, v):
-    """Set a specific row to a color (for future per-tab use)."""
-    leds = ROW_LEDS.get(row, [])
-    for led_idx in leds:
-        kb.set_led(led_idx, h, s, v)
+    for idx in ACTIVE_LEDS:
+        kb.set_led(idx, ORANGE_H, ORANGE_S, ORANGE_V)
+        kb.set_blink(idx, False)
+    kb.set_underglow_breathe(ORANGE_H, ORANGE_S, ORANGE_V)
 
 
 # === Main loop ===
@@ -319,14 +334,14 @@ def connect():
 
 def main():
     kb = connect()
-    pulsing = False
+    state = None  # "your_turn" or "working"
 
     # Skip old events
     pos = STATE_FILE.stat().st_size if STATE_FILE.exists() else 0
 
     def quit_handler(sig=None, frame=None):
-        if pulsing:
-            kb.restore_effect()
+        kb.restore_effect()
+        kb.set_underglow(0, 0, 0)
         kb.close()
         print("\nBye.")
         sys.exit(0)
@@ -335,10 +350,9 @@ def main():
     signal.signal(signal.SIGTERM, quit_handler)
 
     # Start in "your turn" mode — you launched this, Claude is waiting
-    kb.enter_direct_mode()
     set_your_turn(kb)
-    pulsing = True
-    print("Ready — orange on. Waiting for Claude events.\n")
+    state = "your_turn"
+    print("Ready — LEDs 8,7,3,1,0 blinking. Waiting for Claude events.\n")
 
     while True:
         events, pos = read_new_events(pos)
@@ -348,16 +362,15 @@ def main():
             notif = ev.get("notif", "")
 
             if event in YOUR_TURN or (event == "Notification" and notif in YOUR_TURN_NOTIF):
-                if not pulsing:
-                    kb.enter_direct_mode()
+                if state != "your_turn":
                     set_your_turn(kb)
-                    pulsing = True
+                    state = "your_turn"
                     print(f"  >>> Your turn ({event} {notif})")
 
             elif event in CLAUDE_WORKING:
-                if pulsing:
-                    kb.restore_effect()
-                    pulsing = False
+                if state != "working":
+                    set_claude_working(kb)
+                    state = "working"
                     print(f"  <<< Claude working ({event})")
 
         time.sleep(0.05)
