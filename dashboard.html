@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>keyboard-claude</title>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #0a0a0a;
+  --surface: #141414;
+  --border: #1e1e1e;
+  --text: #e0e0e0;
+  --text-dim: #888;
+  --text-muted: #555;
+  --orange: #de7356;
+  --green: #4ade80;
+  --red: #ef4444;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --mono: "SF Mono", "Fira Code", Menlo, monospace;
+  --radius: 8px;
+}
+
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  padding: 20px 24px;
+  max-width: 1100px;
+  margin: 0 auto;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Status bar */
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 20px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.status-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--red);
+  flex-shrink: 0;
+}
+.status-dot.connected { background: var(--green); }
+.sep { width: 1px; height: 16px; background: var(--border); }
+.status-bar .label { color: var(--text-muted); }
+.status-bar .value { color: var(--text-dim); font-family: var(--mono); }
+
+/* Main grid */
+.main {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 20px;
+  margin-bottom: 20px;
+  align-items: start;
+}
+
+/* Section headers */
+.section-header {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 10px;
+}
+
+/* Keyboard */
+.keyboard {
+  display: grid;
+  grid-template-columns: repeat(4, 64px);
+  grid-template-rows: repeat(4, 64px);
+  gap: 4px;
+}
+.key {
+  border-radius: 8px;
+  border: 1.5px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.2s, background 0.2s;
+}
+.key.no-led { border-style: dashed; border-color: #1a1a1a; }
+.key .led-id { font-size: 10px; font-family: var(--mono); color: var(--text-muted); }
+.key .slot-label { font-size: 9px; color: var(--text-muted); margin-top: 2px; }
+.key.active { border-color: var(--orange); }
+.key.active .led-id { color: var(--text); }
+.key.state-your_turn {
+  background: rgba(222, 115, 86, 0.25);
+  border-color: var(--orange);
+  animation: pulse-attention 2s ease-in-out infinite;
+}
+.key.state-acknowledged { background: rgba(222, 115, 86, 0.25); border-color: var(--orange); }
+.key.state-working {
+  border-color: var(--orange);
+  animation: breathe-key 3s ease-in-out infinite;
+}
+.key.state-stale {
+  background: rgba(222, 115, 86, 0.03);
+  border-color: rgba(222, 115, 86, 0.15);
+}
+@keyframes pulse-attention {
+  0%, 100% { background: rgba(222, 115, 86, 0.3); box-shadow: 0 0 12px rgba(222, 115, 86, 0.3); }
+  50% { background: rgba(222, 115, 86, 0.08); box-shadow: none; }
+}
+@keyframes breathe-key {
+  0%, 100% { background: rgba(222, 115, 86, 0.05); }
+  50% { background: rgba(222, 115, 86, 0.22); }
+}
+
+/* Underglow indicator */
+.underglow {
+  margin-top: 4px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(222, 115, 86, 0.15);
+  animation: breathe 4s ease-in-out infinite;
+}
+@keyframes breathe {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+/* Session cards */
+.sessions-grid { display: flex; flex-direction: column; gap: 8px; }
+.session-card {
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 12px;
+}
+.session-slot {
+  width: 28px; height: 28px;
+  border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 600; font-family: var(--mono);
+}
+.session-slot.your_turn,
+.session-slot.acknowledged { background: var(--orange); color: #fff; }
+.session-slot.working { background: rgba(222, 115, 86, 0.15); color: var(--orange); animation: breathe-badge 3s ease-in-out infinite; }
+@keyframes breathe-badge {
+  0%, 100% { background: rgba(222, 115, 86, 0.08); }
+  50% { background: rgba(222, 115, 86, 0.25); }
+}
+.session-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.session-state { font-size: 12px; font-weight: 500; }
+.session-state.your_turn,
+.session-state.acknowledged { color: var(--orange); }
+.session-state.working { color: var(--text-dim); }
+.session-ids {
+  font-size: 11px; color: var(--text-muted); font-family: var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.session-idle { font-size: 11px; color: var(--text-muted); font-family: var(--mono); text-align: right; }
+.empty-state {
+  padding: 24px; text-align: center; color: var(--text-muted); font-size: 12px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+}
+
+/* Event log */
+.event-section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 20px;
+  overflow: hidden;
+}
+.event-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.event-filter {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+  padding: 4px 8px; color: var(--text-dim); font-size: 11px; font-family: var(--mono);
+  outline: none; width: 180px;
+}
+.event-filter:focus { border-color: var(--orange); }
+.event-body {
+  max-height: 300px; overflow-y: auto;
+  scrollbar-width: thin; scrollbar-color: #333 transparent;
+}
+.event-table { width: 100%; border-collapse: collapse; }
+.event-table th {
+  padding: 6px 10px; text-align: left;
+  font-size: 10px; font-weight: 500; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  position: sticky; top: 0; background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.event-table td {
+  padding: 4px 10px; font-size: 11px; font-family: var(--mono);
+  color: var(--text-dim); border-bottom: 1px solid #111; white-space: nowrap;
+}
+.event-table tr:hover td { background: var(--bg); }
+.event-type { padding: 1px 6px; border-radius: 3px; font-size: 10px; }
+.event-type.stop { background: rgba(222, 115, 86, 0.15); color: var(--orange); }
+.event-type.working { background: rgba(100, 100, 100, 0.15); color: var(--text-dim); }
+.event-type.notif { background: rgba(74, 222, 128, 0.15); color: var(--green); }
+
+/* Stats */
+.stats-bar { display: flex; gap: 12px; flex-wrap: wrap; }
+.stat {
+  padding: 10px 14px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  min-width: 90px;
+}
+.stat .label {
+  font-size: 10px; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px;
+}
+.stat .value { font-size: 18px; font-weight: 600; font-family: var(--mono); color: var(--text); }
+.stat .value.orange { color: var(--orange); }
+</style>
+</head>
+<body>
+
+<div class="status-bar" id="status-bar">
+  <div class="status-dot" id="status-dot"></div>
+  <span id="status-text">Connecting...</span>
+  <div class="sep"></div>
+  <span class="label">Uptime</span>
+  <span class="value" id="uptime">&mdash;</span>
+  <div class="sep"></div>
+  <span class="label">Slots</span>
+  <span class="value" id="slots">&mdash;</span>
+</div>
+
+<div class="main">
+  <div class="keyboard-section">
+    <div class="section-header">Keyboard</div>
+    <div class="keyboard" id="keyboard"></div>
+    <div class="underglow"></div>
+  </div>
+  <div class="sessions-section">
+    <div class="section-header">Sessions</div>
+    <div class="sessions-grid" id="sessions">
+      <div class="empty-state">No active sessions</div>
+    </div>
+  </div>
+</div>
+
+<div class="event-section">
+  <div class="event-header">
+    <div class="section-header" style="margin-bottom:0">Event Log</div>
+    <input class="event-filter" id="event-filter" placeholder="Filter events...">
+  </div>
+  <div class="event-body" id="event-body">
+    <table class="event-table">
+      <thead><tr><th>Time</th><th>Session</th><th>Event</th><th>Tool</th></tr></thead>
+      <tbody id="event-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="stats-bar" id="stats-bar"></div>
+
+<script>
+const LAYOUT = [
+  [null, 10, 11, null],
+  [9, 8, 7, 6],
+  [2, 3, 4, 5],
+  [null, 1, 0, null],
+];
+const SLOT_LEDS = [9, 8, 7, 6, 2, 3, 4, 5];
+const DIM_TIMEOUT = 300;
+
+// Build keyboard grid
+const kbEl = document.getElementById('keyboard');
+const keyEls = {};
+for (let row = 0; row < 4; row++) {
+  for (let col = 0; col < 4; col++) {
+    const led = LAYOUT[row][col];
+    const el = document.createElement('div');
+    el.className = 'key' + (led === null ? ' no-led' : '');
+    if (led !== null) {
+      el.innerHTML = '<span class="led-id">' + led + '</span><span class="slot-label"></span>';
+      el.dataset.led = led;
+      keyEls[led] = el;
+    }
+    kbEl.appendChild(el);
+  }
+}
+
+// Auto-scroll tracking
+let autoScroll = true;
+let lastEvKey = '';
+const eventBody = document.getElementById('event-body');
+eventBody.addEventListener('scroll', () => {
+  autoScroll = eventBody.scrollHeight - eventBody.scrollTop - eventBody.clientHeight < 40;
+});
+
+function formatTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  return d.toLocaleTimeString('en-US', { hour12: false });
+}
+
+function formatDuration(s) {
+  if (s < 60) return Math.round(s) + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm ' + Math.round(s % 60) + 's';
+  return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+}
+
+function eventClass(event, notif) {
+  if (event === 'Stop') return 'stop';
+  if (event === 'Notification' && (notif === 'permission_prompt' || notif === 'elicitation_dialog')) return 'stop';
+  if (event === 'PreToolUse' || event === 'UserPromptSubmit') return 'working';
+  if (event === 'Notification') return 'notif';
+  return '';
+}
+
+function updateStatus(status) {
+  document.getElementById('status-dot').className = 'status-dot' + (status.connected ? ' connected' : '');
+  document.getElementById('status-text').textContent = status.connected ? 'Connected (' + status.protocol + ')' : 'Disconnected';
+  document.getElementById('uptime').textContent = formatDuration(status.uptime_seconds);
+  document.getElementById('slots').textContent = status.slots_used + '/' + status.slots_total;
+}
+
+function updateKeyboard(sessions) {
+  const ledMap = {};
+  for (const sess of sessions) ledMap[SLOT_LEDS[sess.slot]] = sess;
+  for (const [led, el] of Object.entries(keyEls)) {
+    const idx = parseInt(led);
+    const sess = ledMap[idx];
+    el.className = 'key';
+
+    if (sess) {
+      el.classList.add('active');
+      el.classList.add(sess.idle_seconds > DIM_TIMEOUT ? 'state-stale' : 'state-' + sess.state);
+      el.querySelector('.slot-label').textContent = 'slot ' + sess.slot;
+    } else {
+      el.querySelector('.slot-label').textContent = '';
+    }
+  }
+}
+
+function updateSessions(sessions) {
+  const el = document.getElementById('sessions');
+  if (!sessions.length) {
+    el.innerHTML = '<div class="empty-state">No active sessions</div>';
+    return;
+  }
+  sessions.sort((a, b) => a.slot - b.slot);
+  el.innerHTML = sessions.map(s => {
+    const label = s.state === 'your_turn' ? 'Your turn' : s.state === 'acknowledged' ? 'Acknowledged' : 'Working';
+    const sid = s.session_id ? s.session_id.slice(0, 8) : '';
+    const iterm = s.iterm_session ? s.iterm_session.slice(-12) : '';
+    return '<div class="session-card">' +
+      '<div class="session-slot ' + s.state + '">' + s.slot + '</div>' +
+      '<div class="session-info">' +
+        '<div class="session-state ' + s.state + '">' + label + '</div>' +
+        '<div class="session-ids">LED ' + s.led_index + ' \u00b7 ' + sid + (iterm ? ' \u00b7 ' + iterm : '') + '</div>' +
+      '</div>' +
+      '<div class="session-idle">' + formatDuration(s.idle_seconds) + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function updateEvents(events) {
+  const tbody = document.getElementById('event-tbody');
+  const filter = document.getElementById('event-filter').value.toLowerCase();
+  const filtered = filter
+    ? events.filter(e =>
+        (e.event || '').toLowerCase().includes(filter) ||
+        (e.session || '').toLowerCase().includes(filter) ||
+        (e.tool || '').toLowerCase().includes(filter) ||
+        (e.notif || '').toLowerCase().includes(filter))
+    : events;
+
+  const key = filtered.length + ':' + (filtered.length ? (filtered[filtered.length - 1].ts || '') : '');
+  if (key === lastEvKey) return;
+  lastEvKey = key;
+
+  tbody.innerHTML = filtered.map(e => {
+    const cls = eventClass(e.event, e.notif);
+    const label = e.notif ? e.event + ' (' + e.notif + ')' : (e.event || '');
+    return '<tr>' +
+      '<td>' + formatTime(e.ts) + '</td>' +
+      '<td>' + (e.session || '').slice(0, 8) + '</td>' +
+      '<td><span class="event-type ' + cls + '">' + label + '</span></td>' +
+      '<td>' + (e.tool || '') + '</td>' +
+    '</tr>';
+  }).join('');
+
+  if (autoScroll) eventBody.scrollTop = eventBody.scrollHeight;
+}
+
+function updateStats(events) {
+  const el = document.getElementById('stats-bar');
+  const counts = {};
+  for (const e of events) counts[e.event || 'unknown'] = (counts[e.event || 'unknown'] || 0) + 1;
+
+  // Avg response time: Stop → next UserPromptSubmit for same session
+  const responseTimes = [];
+  const lastStop = {};
+  for (const e of events) {
+    if (e.event === 'Stop' && e.session) lastStop[e.session] = e.ts;
+    else if (e.event === 'UserPromptSubmit' && e.session && lastStop[e.session]) {
+      responseTimes.push(e.ts - lastStop[e.session]);
+      delete lastStop[e.session];
+    }
+  }
+  const avg = responseTimes.length
+    ? responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length
+    : null;
+
+  let html = Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map(([t, c]) => '<div class="stat"><div class="label">' + t + '</div><div class="value">' + c + '</div></div>')
+    .join('');
+
+  if (avg !== null) {
+    html += '<div class="stat"><div class="label">Avg response</div><div class="value orange">' + formatDuration(avg) + '</div></div>';
+  }
+  el.innerHTML = html;
+}
+
+// Polling
+let pollErrors = 0;
+async function poll() {
+  try {
+    const [sessions, events, status] = await Promise.all([
+      fetch('/api/sessions').then(r => r.json()),
+      fetch('/api/events?n=200').then(r => r.json()),
+      fetch('/api/status').then(r => r.json()),
+    ]);
+    updateStatus(status);
+    updateKeyboard(sessions.sessions);
+    updateSessions(sessions.sessions);
+    updateEvents(events.events);
+    updateStats(events.events);
+    pollErrors = 0;
+  } catch (e) {
+    if (++pollErrors > 5) {
+      document.getElementById('status-dot').className = 'status-dot';
+      document.getElementById('status-text').textContent = 'Dashboard disconnected';
+    }
+  }
+}
+
+poll();
+setInterval(poll, 500);
+</script>
+</body>
+</html>
