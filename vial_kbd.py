@@ -3,7 +3,7 @@
 Multi-session per-key RGB control for Work Louder Micro.
 
 Each Claude Code session gets its own LED. Pressing the physical key
-under a blinking LED switches to that session's iTerm2 tab.
+under a pulsing LED switches to that session's iTerm2 tab.
 
 Architecture:
   hook.sh (with $ITERM_SESSION_ID) → JSONL → this daemon → USB HID → LEDs
@@ -19,12 +19,16 @@ Top row LEDs 10, 11: global attention indicator.
 """
 
 import json
+import math
 import signal
 import struct
 import subprocess
 import sys
 import time
 from pathlib import Path
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
 try:
     import hid
@@ -58,7 +62,8 @@ GLOBAL_LEDS = [10, 11]
 
 # Orange in HSV (QMK scale: H=0-255, S=0-255, V=0-255)
 ORANGE_H, ORANGE_S, ORANGE_V = 9, 255, 200
-DIM_V = 80  # dimmed brightness for "working" state
+DIM_V = 80    # brightness for "working" state
+STALE_V = 30  # very dim for stale sessions (idle >5 min)
 
 # Events that mean "your turn"
 YOUR_TURN = {"Stop"}
@@ -70,6 +75,15 @@ CLAUDE_WORKING = {"PreToolUse", "UserPromptSubmit"}
 # Session timeouts
 DIM_TIMEOUT = 300    # 5 min: dim LED if no events
 RELEASE_TIMEOUT = 600  # 10 min: release slot
+
+# Pulse animation
+PULSE_PERIOD = 2.0   # seconds for a full bright→dim→bright cycle
+PULSE_QUANT = 5      # quantize brightness to reduce USB traffic
+
+# Working state breathing (slower, gentler than pulse — like Claude logo)
+BREATHE_PERIOD = 3.0
+BREATHE_MIN_V = 10
+BREATHE_MAX_V = 120
 
 # --- USB constants ---
 WL_VID = 0x574C
@@ -90,7 +104,7 @@ class Session:
     def __init__(self, session_id, iterm_session, slot):
         self.session_id = session_id
         self.iterm_session = iterm_session
-        self.state = "working"  # "your_turn" or "working"
+        self.state = "working"  # "your_turn", "acknowledged", or "working"
         self.slot = slot
         self.last_event_time = time.monotonic()
 
@@ -192,6 +206,10 @@ class KeyboardProtocol:
 
     def poll_key_event(self):
         """Non-blocking read for 0xEE key events. Returns (row, col) or None."""
+        raise NotImplementedError
+
+    def ping(self):
+        """Returns True if keyboard is still connected."""
         raise NotImplementedError
 
     def close(self):
@@ -299,6 +317,10 @@ class RawHIDProtocol(KeyboardProtocol):
                 return (raw[1], raw[2])
         return None
 
+    def ping(self):
+        resp = self._send(bytes([0xF0]))
+        return resp is not None and resp[0] == 0xF0
+
     def close(self):
         if self.dev:
             self.dev.close()
@@ -400,6 +422,9 @@ class VialRGBProtocol(KeyboardProtocol):
     def poll_key_event(self):
         return None  # VIALRGB firmware doesn't send key events
 
+    def ping(self):
+        return self.dev is not None
+
     def close(self):
         if self.dev:
             self.dev.close()
@@ -475,85 +500,229 @@ def activate_iterm_tab(iterm_session_id):
 # === LED update logic ===
 
 def update_leds(kb, mgr):
-    """Push current session states to LEDs."""
+    """Push current session states to LEDs.
+
+    States:
+      your_turn    → pulse (set initial bright here, animated in main loop)
+      acknowledged → solid bright
+      working      → solid dim
+    Stale overlay (idle >5min) → very dim regardless of state.
+    """
     kb.enter_direct_mode()
     kb.set_all_leds(0, 0, 0)
 
-    # Turn off all blinks first
-    for i in range(NUM_LEDS):
-        kb.set_blink(i, False)
-
-    dimmed = {s.session_id for s in mgr.get_dimmed()}
+    stale = {s.session_id for s in mgr.get_dimmed()}
 
     for sess in mgr.sessions.values():
         led = SLOT_LEDS[sess.slot]
-        is_dim = sess.session_id in dimmed
+        is_stale = sess.session_id in stale
 
-        if sess.state == "your_turn":
-            if is_dim:
-                kb.set_led(led, ORANGE_H, ORANGE_S, DIM_V)
-            else:
-                kb.set_led(led, ORANGE_H, ORANGE_S, ORANGE_V)
-                kb.set_blink(led, True)
-        elif sess.state == "working":
-            kb.set_led(led, ORANGE_H, ORANGE_S, DIM_V if is_dim else DIM_V)
-
-    # Global indicator (top row): only useful with 2+ sessions
-    if len(mgr.sessions) >= 2 and mgr.any_your_turn():
-        for led in GLOBAL_LEDS:
+        if is_stale:
+            kb.set_led(led, ORANGE_H, ORANGE_S, STALE_V)
+        elif sess.state == "your_turn":
+            # Initial value; the pulse loop animates this
             kb.set_led(led, ORANGE_H, ORANGE_S, ORANGE_V)
-            kb.set_blink(led, True)
+        elif sess.state == "acknowledged":
+            kb.set_led(led, ORANGE_H, ORANGE_S, ORANGE_V)
+        elif sess.state == "working":
+            kb.set_led(led, ORANGE_H, ORANGE_S, DIM_V)
 
     # Underglow: always breathing while daemon runs
     kb.set_underglow_breathe(ORANGE_H, ORANGE_S, ORANGE_V)
 
 
+# === Dashboard web server ===
+
+DASHBOARD_PORT = 8787
+
+# Shared state for the dashboard (read-only from web thread)
+_dashboard = {
+    "mgr": None,
+    "start_time": None,
+    "protocol": "",
+    "connected": False,
+}
+
+
+class DashboardHandler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path == "/":
+            self._serve_html()
+        elif path == "/api/sessions":
+            self._api_sessions()
+        elif path == "/api/events":
+            params = parse_qs(parsed.query)
+            n = int(params.get("n", ["200"])[0])
+            self._api_events(n)
+        elif path == "/api/status":
+            self._api_status()
+        else:
+            self.send_error(404)
+
+    def _json(self, data):
+        body = json.dumps(data).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_html(self):
+        html_path = Path(__file__).parent / "dashboard.html"
+        try:
+            body = html_path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body)
+        except FileNotFoundError:
+            self.send_error(404, "dashboard.html not found")
+
+    def _api_sessions(self):
+        mgr = _dashboard["mgr"]
+        if not mgr:
+            return self._json({"sessions": []})
+        now = time.monotonic()
+        sessions = []
+        for sess in list(mgr.sessions.values()):
+            sessions.append({
+                "session_id": sess.session_id,
+                "state": sess.state,
+                "slot": sess.slot,
+                "led_index": SLOT_LEDS[sess.slot],
+                "idle_seconds": round(now - sess.last_event_time, 1),
+                "iterm_session": sess.iterm_session or "",
+            })
+        self._json({"sessions": sessions})
+
+    def _api_events(self, n=200):
+        events = []
+        if STATE_FILE.exists():
+            try:
+                with open(STATE_FILE) as f:
+                    lines = f.readlines()
+                for line in lines[-n:]:
+                    line = line.strip()
+                    if line:
+                        try:
+                            events.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+            except OSError:
+                pass
+        self._json({"events": events})
+
+    def _api_status(self):
+        start = _dashboard["start_time"]
+        uptime = time.monotonic() - start if start else 0
+        mgr = _dashboard["mgr"]
+        slots_used = sum(mgr.slot_used) if mgr else 0
+        self._json({
+            "connected": _dashboard["connected"],
+            "protocol": _dashboard["protocol"],
+            "uptime_seconds": round(uptime, 1),
+            "slots_used": slots_used,
+            "slots_total": MAX_SLOTS,
+        })
+
+    def log_message(self, format, *args):
+        pass
+
+
+def start_dashboard(port=DASHBOARD_PORT):
+    server = HTTPServer(("127.0.0.1", port), DashboardHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
 # === Main loop ===
 
-def connect():
-    """Try VIALRGB first, fall back to Raw HID."""
+def try_connect():
+    """Try VIALRGB first, fall back to Raw HID. Returns None if not found."""
     vial = VialRGBProtocol()
     if vial.connect():
         return vial
-
     raw = RawHIDProtocol()
     if raw.connect():
         return raw
-
-    print("No compatible keyboard found.")
-    print("Expected: Work Louder Micro with VIALRGB or Raw HID firmware")
-    print(f"  VID=0x{WL_VID:04X} PID=0x{WL_PID:04X}")
-    sys.exit(1)
+    return None
 
 
 def main():
-    kb = connect()
     mgr = SessionManager()
     leds_dirty = False
 
-    # Underglow breathing = daemon is active
-    kb.set_underglow_breathe(ORANGE_H, ORANGE_S, ORANGE_V)
+    # Start web dashboard first — works even without keyboard
+    _dashboard["mgr"] = mgr
+    _dashboard["start_time"] = time.monotonic()
+    start_dashboard()
+    print(f"Dashboard: http://localhost:{DASHBOARD_PORT}")
+
+    # Try initial keyboard connection
+    kb = try_connect()
+    if kb:
+        _dashboard["connected"] = True
+        _dashboard["protocol"] = type(kb).__name__.replace("Protocol", "")
+        kb.set_underglow_breathe(ORANGE_H, ORANGE_S, ORANGE_V)
+        print(f"Keyboard connected ({_dashboard['protocol']}).")
+    else:
+        print("Keyboard not found. Will keep trying...")
 
     pos = STATE_FILE.stat().st_size if STATE_FILE.exists() else 0
     last_cleanup = time.monotonic()
+    last_connect_attempt = time.monotonic()
+    last_heartbeat = time.monotonic()
+    last_pulse_v = {}
 
     def quit_handler(sig=None, frame=None):
-        kb.enter_direct_mode()
-        kb.set_all_leds(0, 0, 0)
-        for i in range(NUM_LEDS):
-            kb.set_blink(i, False)
-        kb.set_underglow(0, 0, 0)
-        kb.close()
+        if kb:
+            try:
+                kb.enter_direct_mode()
+                kb.set_all_leds(0, 0, 0)
+                kb.set_underglow(0, 0, 0)
+                kb.close()
+            except Exception:
+                pass
         print("\nBye.")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, quit_handler)
     signal.signal(signal.SIGTERM, quit_handler)
 
-    print(f"Ready — {MAX_SLOTS} session slots. Waiting for Claude events.\n")
+    print(f"Ready — {MAX_SLOTS} session slots.\n")
 
     while True:
-        # 1. Read JSONL events
+        now = time.monotonic()
+
+        # 0. Reconnect if keyboard not connected
+        if kb is None:
+            if now - last_connect_attempt > 3:
+                last_connect_attempt = now
+                kb = try_connect()
+                if kb:
+                    _dashboard["connected"] = True
+                    _dashboard["protocol"] = type(kb).__name__.replace("Protocol", "")
+                    kb.set_underglow_breathe(ORANGE_H, ORANGE_S, ORANGE_V)
+                    leds_dirty = True
+                    last_heartbeat = now
+                    print(f"Keyboard connected ({_dashboard['protocol']}).")
+
+        # 1. Heartbeat: detect keyboard disconnection
+        if kb and now - last_heartbeat > 5:
+            last_heartbeat = now
+            if not kb.ping():
+                print("Keyboard disconnected.")
+                kb.close()
+                kb = None
+                _dashboard["connected"] = False
+                leds_dirty = False
+                last_pulse_v.clear()
+
+        # 2. Read JSONL events (works without keyboard)
         events, pos = read_new_events(pos)
 
         for ev in events:
@@ -567,7 +736,7 @@ def main():
 
             sess = mgr.get_or_create(session_id, iterm_session)
             if not sess:
-                continue  # no slots available
+                continue
 
             if event in YOUR_TURN or (event == "Notification" and notif in YOUR_TURN_NOTIF):
                 if sess.state != "your_turn":
@@ -576,26 +745,32 @@ def main():
                     print(f"  [{sess.slot}] >>> Your turn ({event} {notif})")
 
             elif event in CLAUDE_WORKING:
-                if sess.state != "working":
+                if sess.state in ("your_turn", "acknowledged"):
                     sess.state = "working"
                     leds_dirty = True
+                    last_pulse_v.pop(SLOT_LEDS[sess.slot], None)
                     print(f"  [{sess.slot}] <<< Working ({event})")
 
-        # 2. Poll for key events from firmware
-        key = kb.poll_key_event()
-        if key:
-            row, col = key
-            slot = KEY_TO_SLOT.get((row, col))
-            if slot is not None:
-                sess = mgr.get_by_slot(slot)
-                if sess and sess.iterm_session:
-                    print(f"  [{slot}] KEY row={row} col={col} → iTerm {sess.iterm_session}")
-                    activate_iterm_tab(sess.iterm_session)
-                else:
-                    print(f"  [{slot}] KEY row={row} col={col} (no session)")
+        # 3. Poll for key events (keyboard required)
+        if kb:
+            key = kb.poll_key_event()
+            if key:
+                row, col = key
+                slot = KEY_TO_SLOT.get((row, col))
+                if slot is not None:
+                    sess = mgr.get_by_slot(slot)
+                    if sess and sess.iterm_session:
+                        print(f"  [{slot}] KEY row={row} col={col} → iTerm {sess.iterm_session}")
+                        activate_iterm_tab(sess.iterm_session)
+                        if sess.state == "your_turn":
+                            sess.state = "acknowledged"
+                            leds_dirty = True
+                            last_pulse_v.pop(SLOT_LEDS[sess.slot], None)
+                            print(f"  [{slot}] ✓ Acknowledged")
+                    else:
+                        print(f"  [{slot}] KEY row={row} col={col} (no session)")
 
-        # 3. Periodic cleanup of stale sessions
-        now = time.monotonic()
+        # 4. Periodic cleanup of stale sessions
         if now - last_cleanup > 30:
             stale = mgr.cleanup_stale()
             if stale:
@@ -604,10 +779,44 @@ def main():
                     print(f"  Released stale session {sid[:8]}...")
             last_cleanup = now
 
-        # 4. Update LEDs if anything changed
-        if leds_dirty:
+        # 5. Update LEDs if anything changed (keyboard required)
+        if leds_dirty and kb:
             update_leds(kb, mgr)
+            last_pulse_v.clear()
             leds_dirty = False
+
+        # 6. Animate pulse for "your_turn" LEDs (keyboard required)
+        if kb and mgr.any_your_turn():
+            stale_ids = {s.session_id for s in mgr.get_dimmed()}
+            t = now % PULSE_PERIOD
+            pulse = (math.sin(t / PULSE_PERIOD * 2 * math.pi - math.pi / 2) + 1) / 2
+            v = int(DIM_V + (ORANGE_V - DIM_V) * pulse)
+            v = v // PULSE_QUANT * PULSE_QUANT
+
+            for sess in mgr.sessions.values():
+                if sess.state != "your_turn" or sess.session_id in stale_ids:
+                    continue
+                led = SLOT_LEDS[sess.slot]
+                if last_pulse_v.get(led) != v:
+                    kb.set_led(led, ORANGE_H, ORANGE_S, v)
+                    last_pulse_v[led] = v
+
+        # 7. Animate breathing for "working" LEDs (keyboard required)
+        if kb:
+            has_working = any(s.state == "working" for s in mgr.sessions.values())
+            if has_working:
+                stale_ids = {s.session_id for s in mgr.get_dimmed()}
+                t = now % BREATHE_PERIOD
+                breathe = (math.sin(t / BREATHE_PERIOD * 2 * math.pi - math.pi / 2) + 1) / 2
+                bv = int(BREATHE_MIN_V + (BREATHE_MAX_V - BREATHE_MIN_V) * breathe)
+                bv = bv // PULSE_QUANT * PULSE_QUANT
+                for sess in mgr.sessions.values():
+                    if sess.state != "working" or sess.session_id in stale_ids:
+                        continue
+                    led = SLOT_LEDS[sess.slot]
+                    if last_pulse_v.get(led) != bv:
+                        kb.set_led(led, ORANGE_H, ORANGE_S, bv)
+                        last_pulse_v[led] = bv
 
         time.sleep(0.05)
 
