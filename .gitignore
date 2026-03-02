@@ -11,3 +11,6 @@ __pycache__/
 
 # Skill files (installed separately)
 *.skill
+
+# Native app build output
+build/
